@@ -1,0 +1,699 @@
+#include <WiFi.h>
+#include <WiFiUdp.h>
+#include <WebServer.h>
+
+// ============================================================
+// WIFI
+// ============================================================
+
+const char* WIFI_SSID = "ESP32_RANGING";
+const char* WIFI_PASSWORD = "12345678";
+
+WebServer server(80);
+
+WiFiUDP udp;
+
+const uint16_t UDP_PORT = 4210;
+
+// ============================================================
+// RSSI DISTANCE
+// ============================================================
+
+float RSSI_AT_1M = -45.0;
+
+float PATH_LOSS_EXPONENT = 2.2;
+
+int currentRSSI = -100;
+
+float estimatedDistance = 999.0;
+
+// ============================================================
+// RECEIVED MPU DATA
+// ============================================================
+
+struct SensorPacket {
+
+    uint32_t packetNumber;
+
+    float ax;
+    float ay;
+    float az;
+
+    float gx;
+    float gy;
+    float gz;
+
+};
+
+SensorPacket packet;
+
+unsigned long lastPacketTime = 0;
+
+bool sensorConnected = false;
+
+// ============================================================
+// DISTANCE
+// ============================================================
+
+float calculateDistance(int rssi) {
+
+    return pow(
+        10.0,
+        (RSSI_AT_1M - rssi) /
+        (10.0 * PATH_LOSS_EXPONENT)
+    );
+}
+
+// ============================================================
+// PROXIMITY
+// ============================================================
+
+String getProximity(
+    float distance
+) {
+
+    if (distance < 0.5)
+        return "VERY CLOSE";
+
+    if (distance < 1.5)
+        return "CLOSE";
+
+    if (distance < 3.0)
+        return "MEDIUM";
+
+    return "FAR";
+}
+
+// ============================================================
+// UDP RECEIVE
+// ============================================================
+
+void receiveSensorPacket() {
+
+    int packetSize =
+        udp.parsePacket();
+
+    if (packetSize != sizeof(SensorPacket)) {
+
+        return;
+    }
+
+    udp.read(
+        (uint8_t*)&packet,
+        sizeof(packet)
+    );
+
+    lastPacketTime = millis();
+
+    sensorConnected = true;
+}
+
+// ============================================================
+// WEB PAGE
+// ============================================================
+
+const char webpage[] PROGMEM = R"rawliteral(
+
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+<meta name="viewport"
+content="width=device-width, initial-scale=1">
+
+<title>ESP32 V2V Monitor</title>
+
+<style>
+
+body {
+
+    font-family: Arial;
+
+    background: #111;
+
+    color: white;
+
+    text-align: center;
+
+    margin: 0;
+
+    padding: 20px;
+}
+
+.container {
+
+    max-width: 700px;
+
+    margin: auto;
+}
+
+.card {
+
+    background: #222;
+
+    border-radius: 20px;
+
+    padding: 25px;
+
+    margin-bottom: 20px;
+}
+
+.title {
+
+    font-size: 30px;
+
+    font-weight: bold;
+}
+
+.distance {
+
+    font-size: 50px;
+
+    margin: 20px;
+}
+
+.rssi {
+
+    font-size: 28px;
+}
+
+.proximity {
+
+    font-size: 30px;
+
+    padding: 15px;
+
+    border-radius: 15px;
+}
+
+.sensor-grid {
+
+    display: grid;
+
+    grid-template-columns:
+    repeat(3, 1fr);
+
+    gap: 10px;
+}
+
+.sensor {
+
+    background: #333;
+
+    padding: 15px;
+
+    border-radius: 12px;
+}
+
+.label {
+
+    font-size: 14px;
+
+    opacity: 0.7;
+}
+
+.value {
+
+    font-size: 22px;
+
+    margin-top: 8px;
+}
+
+</style>
+
+</head>
+
+<body>
+
+<div class="container">
+
+<div class="card">
+
+<div class="title">
+
+V2V PROXIMITY MONITOR
+
+</div>
+
+<p>ESP32-A ↔ ESP32-B</p>
+
+<div class="distance"
+id="distance">
+
+-- m
+
+</div>
+
+<div class="rssi"
+id="rssi">
+
+-- dBm
+
+</div>
+
+<div class="proximity"
+id="proximity">
+
+--
+
+</div>
+
+</div>
+
+<div class="card">
+
+<h2>MPU6050 DATA</h2>
+
+<div class="sensor-grid">
+
+<div class="sensor">
+
+<div class="label">ACC X</div>
+
+<div class="value"
+id="ax">
+--
+</div>
+
+</div>
+
+<div class="sensor">
+
+<div class="label">ACC Y</div>
+
+<div class="value"
+id="ay">
+--
+</div>
+
+</div>
+
+<div class="sensor">
+
+<div class="label">ACC Z</div>
+
+<div class="value"
+id="az">
+--
+</div>
+
+</div>
+
+<div class="sensor">
+
+<div class="label">GYRO X</div>
+
+<div class="value"
+id="gx">
+--
+</div>
+
+</div>
+
+<div class="sensor">
+
+<div class="label">GYRO Y</div>
+
+<div class="value"
+id="gy">
+--
+</div>
+
+</div>
+
+<div class="sensor">
+
+<div class="label">GYRO Z</div>
+
+<div class="value"
+id="gz">
+--
+</div>
+
+</div>
+
+</div>
+
+<br>
+
+<div>
+
+Packet:
+
+<span id="packet">
+--
+</span>
+
+</div>
+
+</div>
+
+</div>
+
+<script>
+
+async function update() {
+
+    try {
+
+        let response =
+            await fetch("/api/data");
+
+        let data =
+            await response.json();
+
+        document.getElementById("distance")
+            .innerHTML =
+            data.distance.toFixed(2) + " m";
+
+        document.getElementById("rssi")
+            .innerHTML =
+            data.rssi + " dBm";
+
+        document.getElementById("proximity")
+            .innerHTML =
+            data.proximity;
+
+        document.getElementById("ax")
+            .innerHTML =
+            data.ax.toFixed(2);
+
+        document.getElementById("ay")
+            .innerHTML =
+            data.ay.toFixed(2);
+
+        document.getElementById("az")
+            .innerHTML =
+            data.az.toFixed(2);
+
+        document.getElementById("gx")
+            .innerHTML =
+            data.gx.toFixed(2);
+
+        document.getElementById("gy")
+            .innerHTML =
+            data.gy.toFixed(2);
+
+        document.getElementById("gz")
+            .innerHTML =
+            data.gz.toFixed(2);
+
+        document.getElementById("packet")
+            .innerHTML =
+            data.packet;
+
+        let element =
+            document.getElementById("proximity");
+
+        if (
+            data.proximity ===
+            "VERY CLOSE"
+        ) {
+
+            element.style.background =
+                "#006600";
+        }
+
+        else if (
+            data.proximity === "CLOSE"
+        ) {
+
+            element.style.background =
+                "#557700";
+        }
+
+        else if (
+            data.proximity === "MEDIUM"
+        ) {
+
+            element.style.background =
+                "#776600";
+        }
+
+        else {
+
+            element.style.background =
+                "#660000";
+        }
+
+    }
+
+    catch(error) {
+
+        console.log(error);
+
+    }
+
+}
+
+setInterval(update, 250);
+
+update();
+
+</script>
+
+</body>
+
+</html>
+
+)rawliteral";
+
+// ============================================================
+// API
+// ============================================================
+
+void handleData() {
+
+    currentRSSI =
+        WiFi.RSSI();
+
+    estimatedDistance =
+        calculateDistance(
+            currentRSSI
+        );
+
+    String proximity =
+        getProximity(
+            estimatedDistance
+        );
+
+    // Consider sensor lost after 2 seconds
+    if (
+        millis() - lastPacketTime > 2000
+    ) {
+
+        sensorConnected = false;
+    }
+
+    String json = "{";
+
+    json += "\"rssi\":";
+    json += currentRSSI;
+
+    json += ",";
+
+    json += "\"distance\":";
+    json += String(
+        estimatedDistance,
+        2
+    );
+
+    json += ",";
+
+    json += "\"proximity\":\"";
+    json += proximity;
+    json += "\"";
+
+    json += ",";
+
+    json += "\"packet\":";
+    json += packet.packetNumber;
+
+    json += ",";
+
+    json += "\"ax\":";
+    json += packet.ax;
+
+    json += ",";
+
+    json += "\"ay\":";
+    json += packet.ay;
+
+    json += ",";
+
+    json += "\"az\":";
+    json += packet.az;
+
+    json += ",";
+
+    json += "\"gx\":";
+    json += packet.gx;
+
+    json += ",";
+
+    json += "\"gy\":";
+    json += packet.gy;
+
+    json += ",";
+
+    json += "\"gz\":";
+    json += packet.gz;
+
+    json += ",";
+
+    json += "\"sensorConnected\":";
+
+    json += sensorConnected
+        ? "true"
+        : "false";
+
+    json += "}";
+
+    server.send(
+        200,
+        "application/json",
+        json
+    );
+}
+
+// ============================================================
+// ROOT
+// ============================================================
+
+void handleRoot() {
+
+    server.send_P(
+        200,
+        "text/html",
+        webpage
+    );
+}
+
+// ============================================================
+// SETUP
+// ============================================================
+
+void setup() {
+
+    Serial.begin(115200);
+
+    delay(1000);
+
+    WiFi.mode(WIFI_STA);
+
+    WiFi.begin(
+        WIFI_SSID,
+        WIFI_PASSWORD
+    );
+
+    Serial.print("Connecting");
+
+    while (
+        WiFi.status() != WL_CONNECTED
+    ) {
+
+        delay(500);
+
+        Serial.print(".");
+    }
+
+    Serial.println();
+
+    Serial.println("WiFi connected.");
+
+    Serial.print("ESP32-B IP: ");
+
+    Serial.println(
+        WiFi.localIP()
+    );
+
+    udp.begin(
+        UDP_PORT
+    );
+
+    server.on(
+        "/",
+        handleRoot
+    );
+
+    server.on(
+        "/api/data",
+        handleData
+    );
+
+    server.begin();
+
+    Serial.println(
+        "Web server started."
+    );
+}
+
+// ============================================================
+// LOOP
+// ============================================================
+
+void loop() {
+
+    server.handleClient();
+
+    receiveSensorPacket();
+
+    static unsigned long lastPrint = 0;
+
+    if (
+        millis() - lastPrint >= 1000
+    ) {
+
+        lastPrint = millis();
+
+        currentRSSI =
+            WiFi.RSSI();
+
+        estimatedDistance =
+            calculateDistance(
+                currentRSSI
+            );
+
+        Serial.print("RSSI: ");
+
+        Serial.print(
+            currentRSSI
+        );
+
+        Serial.print(" dBm | Distance: ");
+
+        Serial.print(
+            estimatedDistance,
+            2
+        );
+
+        Serial.print(" m | Packet: ");
+
+        Serial.print(
+            packet.packetNumber
+        );
+
+        Serial.print(" | AX: ");
+
+        Serial.print(
+            packet.ax,
+            2
+        );
+
+        Serial.print(" AY: ");
+
+        Serial.print(
+            packet.ay,
+            2
+        );
+
+        Serial.print(" AZ: ");
+
+        Serial.println(
+            packet.az,
+            2
+        );
+    }
+}
